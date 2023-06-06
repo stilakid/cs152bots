@@ -8,6 +8,14 @@ import re
 import requests
 from report import Report, State
 import pdb
+# classifier requirements
+import io
+import numpy as np
+from PIL import Image
+import pytorch_lightning as pl
+import torch
+import torchvision.transforms as transforms
+from classifier.classifier import NN
 
 # Set up logging to the console
 logger = logging.getLogger('discord')
@@ -38,6 +46,9 @@ class ModBot(discord.Client):
         self.curr_report = None # Sets the Report currently being handled by moderator
         self.curr_report_idx = None
         self.warned_users = set()  # Set of users who have been warned for adult nudity
+        # neural network model for automated image classification
+        self.model = NN.load_from_checkpoint("classifier/lightning_logs/version_0/checkpoints/epoch=30-step=43617.ckpt")
+        self.model.eval()
 
     async def on_ready(self):
         print(f'{self.user.name} has connected to Discord! It is these guilds:')
@@ -111,10 +122,10 @@ class ModBot(discord.Client):
             # Forward the message to the mod channel
             mod_channel = self.mod_channels[message.guild.id]
             # await mod_channel.send(f'Forwarded message:\n{message.author.name}: "{message.content}"')
-            scores = self.eval_text(message.content)
+            scores = await self.eval_text(message)
             # await mod_channel.send(self.code_format(scores))
             return
-            
+
         # handle moderator flow in mod channel
         elif message.channel.name == f'group-{self.group_num}-mod':
             if message.content == Report.QUEUE_KEYWORD:
@@ -206,12 +217,30 @@ class ModBot(discord.Client):
                 return
 
     
-    def eval_text(self, message):
+    async def eval_text(self, message):
         ''''
         TODO: Once you know how you want to evaluate messages in your channel, 
         insert your code here! This will primarily be used in Milestone 3. 
         '''
-        return message
+        # don't evaluate message if there's no images
+        if len(message.attachments) > 0:
+            classes = ('plane', 'car', 'bird', 'cat', 'deer', 'dog', 'frog', 'horse', 'ship', 'truck')
+            predictions = []
+            for attachment in message.attachments:
+                if attachment.content_type.startswith("image"):
+                    img_bytes = await attachment.read()
+                    img = Image.open(io.BytesIO(img_bytes))
+
+                    test_transform = transforms.Compose([
+                        transforms.ToTensor(),
+                        transforms.Resize((32, 32), antialias=True),
+                        transforms.Normalize((0.491, 0.482, 0.446), (0.247, 0.243, 0.261)),]
+                    )
+
+                    res = self.model(test_transform(img).unsqueeze(0))
+                    predictions.append(classes[torch.argmax(res, dim=1)])
+                    print(predictions)
+            return predictions
 
     
     def code_format(self, text):
