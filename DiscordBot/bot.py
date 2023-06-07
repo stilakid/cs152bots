@@ -1,6 +1,5 @@
 # bot.py
 from collections import deque
-
 import cityhash
 import discord
 import os
@@ -11,6 +10,7 @@ from report import Report, State
 import pdb
 # classifier requirements
 import io
+import requests
 import numpy as np
 from PIL import Image
 import pytorch_lightning as pl
@@ -89,7 +89,6 @@ class ModBot(discord.Client):
             self.reports['bot_adult'].append(report)
         elif report.report_csam():
             self.reports['bot_csam'].append(report)
-
         return
 
     # Given a link to a message and a valid classification, makes a report for that message and adds it to the report
@@ -97,11 +96,11 @@ class ModBot(discord.Client):
     #
     # message_link: discord message link
     # classification: either Report.ADULT or Report.CSAM
-    def add_message_to_bot_queue(self, message_link, classification):
-        report = Report()
+    async def add_message_to_bot_queue(self, message, classification):
+        report = Report(self)
         report.reporter = "bot"
         report.state = State.AWAITING_MESSAGE
-        report.handle_message(message_link)
+        await report.handle_message(message, bot=True)
         report.state = classification
         self.add_report_to_bot_queue(report)
         return
@@ -112,7 +111,6 @@ class ModBot(discord.Client):
                 return True
         return False
 
-
     # won't overwrite an existing entry
     def add_to_report_table(self, report, result):
         if self.report_table.keys().__contains__(report.link):
@@ -121,7 +119,6 @@ class ModBot(discord.Client):
             self.report_table[report.link][cityhash.CityHash128(report.message)] = result
         else:
             self.report_table[report.link] = dict([(cityhash.CityHash128(report.message.content), result)])
-
 
     # returns the result on success, returns None on failure
     def report_table_result(self, report):
@@ -176,7 +173,6 @@ class ModBot(discord.Client):
             # update reportee table
             self.update_reportee(report.reportedUser, report.link, 1)
 
-
     async def on_ready(self):
         print(f'{self.user.name} has connected to Discord! It is these guilds:')
         for guild in self.guilds:
@@ -197,7 +193,6 @@ class ModBot(discord.Client):
                     self.mod_channels[guild.id] = channel
                     self.mod_channel = channel
         
-
     async def on_message(self, message):
         '''
         This function is called whenever a message is sent in a channel that the bot can see (including DMs). 
@@ -213,7 +208,6 @@ class ModBot(discord.Client):
         else:
             await self.handle_dm(message)
         self.print_tables()
-
 
     async def handle_dm(self, message):
         # Handle a help message
@@ -266,8 +260,6 @@ class ModBot(discord.Client):
                 # If the report is complete or cancelled, remove it from our map
                 elif self.active_reporters[message.author.id].report_complete():
                     self.active_reporters.pop(message.author.id)
-
-
 
     async def handle_channel_message(self, message):
         # handle messages sent in the "group-#" channel - eventually link classifier here
@@ -420,7 +412,7 @@ class ModBot(discord.Client):
 
                 if self.active_moderators[message.author.id].state == State.ADULT:
                     await self.mod_channel.send(
-                        f"Deleted by moderator: \n{self.active_moderators[message.author.id].message.author}: `{self.active_moderators[message.author.id].message.content}`")
+                        f"Deleted by moderator: \n{self.active_moderators[message.author.id].message.author}: `{message.content}`")
                     await self.active_moderators[message.author.id].message.delete()
                     reply = "The message has been removed, the user has been banned, and NCMEC has been notified. Thank you!"
                     await message.channel.send(reply)
@@ -433,7 +425,6 @@ class ModBot(discord.Client):
                     self.active_moderators.pop(message.author.id)
                     return
 
-            
             elif message.content == "invalid":
                 # update report table
                 self.add_to_report_table(self.active_moderators[message.author.id], "invalid")
@@ -449,15 +440,14 @@ class ModBot(discord.Client):
                 await message.channel.send(reply)
                 return
 
-    
     async def eval_text(self, message):
         ''''
         TODO: Once you know how you want to evaluate messages in your channel, 
         insert your code here! This will primarily be used in Milestone 3. 
         '''
+        classes = ('plane', 'car', 'bird', 'cat', 'deer', 'dog', 'frog', 'horse', 'ship', 'truck')
         # don't evaluate message if there's no images
         if len(message.attachments) > 0:
-            classes = ('plane', 'car', 'bird', 'cat', 'deer', 'dog', 'frog', 'horse', 'ship', 'truck')
             predictions = []
             for attachment in message.attachments:
                 if attachment.content_type.startswith("image"):
@@ -472,8 +462,39 @@ class ModBot(discord.Client):
 
                     res = self.model(test_transform(img).unsqueeze(0))
                     predictions.append(classes[torch.argmax(res, dim=1)])
-                    print(predictions)
-            return predictions
+            
+            if not message.content:
+                message.content = ""
+            # CSAM
+            if "cat" in predictions:
+                await self.add_message_to_bot_queue(message, State.CSAM)
+            # Adult
+            elif "dog" in predictions:
+                await self.add_message_to_bot_queue(message, State.ADULT)
+            
+            await self.mod_channel.send(self.code_format(message.content))
+        else:
+            url = re.search("(?P<url>https?://[^\s]+)", message.content).group("url")
+            if url:
+                response = requests.get(url)
+                img = Image.open(io.BytesIO(response.content))
+                test_transform = transforms.Compose([
+                    transforms.ToTensor(),
+                    transforms.Resize((32, 32), antialias=True),
+                    transforms.Normalize((0.491, 0.482, 0.446), (0.247, 0.243, 0.261)),]
+                )
+                res = self.model(test_transform(img).unsqueeze(0))
+                prediction = classes[torch.argmax(res, dim=1)]
+                print(prediction)
+
+                # CSAM
+                if prediction == "cat":
+                    await self.add_message_to_bot_queue(message, State.CSAM)
+                # Adult
+                elif prediction == "dog":
+                    await self.add_message_to_bot_queue(message, State.ADULT)
+            await self.mod_channel.send(self.code_format(message.content))
+        return
 
     
     def code_format(self, text):
@@ -482,7 +503,7 @@ class ModBot(discord.Client):
         evaluated, insert your code here for formatting the string to be 
         shown in the mod channel. 
         '''
-        return "Evaluated: '" + text+ "'"
+        return "Evaluated image: `" + text+ "`"
 
 
 client = ModBot()
