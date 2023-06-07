@@ -68,12 +68,18 @@ class Report:
         self.reporter = None
         self.link = None
     
-    async def handle_message(self, message):
+    async def handle_message(self, message, bot=False):
         '''
         This function makes up the meat of the user-side reporting flow. It defines how we transition between states and what 
         prompts to offer at each of those states. You're welcome to change anything you want; this skeleton is just here to
         get you started and give you a model for working with Discord. 
         '''
+        # if message object is directly passed, aka creating bot report without user interaction
+        if bot:
+            self.message = message
+            self.link = message.jump_url
+            self.reportedUser = self.message.author.name
+            return
 
         if message.content == self.CANCEL_KEYWORD:
             self.state = State.REPORT_COMPLETE
@@ -250,7 +256,7 @@ class Report:
             reply = "You are moderating the message ```"
             reply += f" {message.content} "
             reply += "``` "
-            reply += f"{self.link}, which has been reported for adult nudity."
+            reply += f"{self.link}, which has been reported for adult nudity. "
             reply += "Please state if the report is valid.\n"
             reply += "Use the command `valid` if the message features adult nudity.\n"
             reply += "Use the command `invalid` if the message does not actually feature adult nudity.\n"
@@ -261,7 +267,7 @@ class Report:
             reply = "You are moderating the message ```"
             reply += f" {message.content} "
             reply += "``` "
-            reply += f"{self.link}, which has been reported for CSAM."
+            reply += f"{self.link}, which has been reported for CSAM. "
             reply += "Please state if the report is valid.\n"
             reply += "Use the command `valid` if the message features CSAM.\n"
             reply += "Use the command `invalid` if the message does not actually feature CSAM or nudity.\n"
