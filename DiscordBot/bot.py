@@ -1,11 +1,12 @@
 # bot.py
+from collections import deque
+
+import cityhash
 import discord
-from discord.ext import commands
 import os
 import json
 import logging
 import re
-import requests
 from report import Report, State
 import pdb
 # classifier requirements
@@ -40,16 +41,141 @@ class ModBot(discord.Client):
         intents = discord.Intents.default()
         intents.message_content = True
         super().__init__(command_prefix='.', intents=intents)
+
+        REPORTEE_THRESHOLD = 20
+        REPORTER_THRESHOLD = 0.8
         self.group_num = None
         self.mod_channels = {} # Map from guild to the mod channel id for that guild
         # self.reports = {} # Map from user IDs to the state of their report
-        self.reports = [] # list of outstanding reports
+        self.reports = {
+            'user_csam': deque([]),
+            'user_adult': deque([]),
+            'bot_csam': deque([]),
+            'bot_adult': deque([])
+        }
+        self.queue_num = ['user_csam', 'user_adult', 'bot_csam', 'bot_adult']
+        self.active_reporters = {}
+        self.active_moderators = {}
         self.curr_report = None # Sets the Report currently being handled by moderator
         self.curr_report_idx = None
         self.warned_users = set()  # Set of users who have been warned for adult nudity
+        self.report_table = dict([("sample.comment.url", dict([(cityhash.CityHash128("this is a sample comment"), "dummy-result")]))])
+        self.reporter_table = {}
+        self.reportee_table = {}
+        self.targetted_users = []
         # neural network model for automated image classification
         self.model = NN.load_from_checkpoint("classifier/lightning_logs/version_0/checkpoints/epoch=30-step=43617.ckpt")
         self.model.eval()
+
+    def print_tables(self):
+        print("number of active reporters")
+        print(len(self.active_reporters))
+        print("number of reports in report queues")
+        print(self.reports)
+        print("Reporter table")
+        print(self.reporter_table)
+        print("Reportee table")
+        print(self.reportee_table)
+        print("Report table")
+        print(self.report_table)
+
+    # Given a report, adds it to the report queue for reports made by bots.
+    def add_report_to_bot_queue(self, report):
+        if self.in_report_table(report):
+            self.update_tables(report)
+            return
+
+        if report.report_adult():
+            self.reports['bot_adult'].append(report)
+        elif report.report_csam():
+            self.reports['bot_csam'].append(report)
+
+        return
+
+    # Given a link to a message and a valid classification, makes a report for that message and adds it to the report
+    # queue meant for bots.
+    #
+    # message_link: discord message link
+    # classification: either Report.ADULT or Report.CSAM
+    def add_message_to_bot_queue(self, message_link, classification):
+        report = Report()
+        report.reporter = "bot"
+        report.state = State.AWAITING_MESSAGE
+        report.handle_message(message_link)
+        report.state = classification
+        self.add_report_to_bot_queue(report)
+        return
+
+    def in_report_table(self, report):
+        if self.report_table.keys().__contains__(report.link):
+            if self.report_table[report.link].keys().__contains__(cityhash.CityHash128(report.message.content)):
+                return True
+        return False
+
+
+    # won't overwrite an existing entry
+    def add_to_report_table(self, report, result):
+        if self.report_table.keys().__contains__(report.link):
+            if self.report_table[report.link].keys().__contains__(cityhash.CityHash128(report.message.content)):
+                return
+            self.report_table[report.link][cityhash.CityHash128(report.message)] = result
+        else:
+            self.report_table[report.link] = dict([(cityhash.CityHash128(report.message.content), result)])
+
+
+    # returns the result on success, returns None on failure
+    def report_table_result(self, report):
+        if not self.in_report_table(report):
+            return None
+        return self.report_table[report.link][cityhash.CityHash128(report.message.content)]
+
+    # reporter table structure: {string user : [int good, int bad]}, ex: {emilyc02 : [1, 0], stilakid: [3, 1]}
+    # good/bad are 1 if adding to good/bad report count, 0 if not
+    def update_reporter(self, user, good, bad):
+        if user in self.reporter_table:
+            self.reporter_table.update({user : [self.reporter_table[user][0] + good, self.reporter_table[user][1] + bad]})
+        else:
+            self.reporter_table[user] = [good, bad]
+
+    def in_reporter_table(self, user):
+        return user in self.reporter_table
+
+    def reporter_is_up_to_no_good(self, user):
+        if self.in_reporter_table(user) and float(self.reporter_table[user][0]) / float(self.reporter_table[user][1]) >= self.REPORTER_THRESHOLD:
+            return True
+        return False
+    
+    # reporter table structure: {string user : [{dict comment: int reports}, int warned]}
+    # warned is 1 if adding warning, 0 if not
+    def update_reportee(self, user, comment_url, warned):
+        if user in self.reportee_table:
+            if warned:
+                self.reportee_table[user][1] += warned
+            if comment_url:
+                self.reportee_table[user][0][comment_url] = self.reportee_table[user][0].get(comment_url, 0) + 1
+        else:
+            self.reportee_table[user] = [{comment_url: 1}, warned]
+
+    def in_reportee_table(self, user):
+        return user in self.reportee_table
+
+    def reportee_is_targetted(self, user, comment_url):
+        if self.in_reportee_table(user) and self.reportee_table[user][0][comment_url] >= self.REPORTEE_THRESHOLD:
+            return True
+        return False
+
+    # update table if report is already in the report table
+    def update_tables(self, report):
+        result = self.report_table_result(report)
+        if result == "valid" or result == "wrong-type":
+            # update reporter table
+            self.update_reporter(report.reporter, 1, 0)
+        elif result == "invalid":
+            # update reporter table
+            self.update_reporter(report.reporter, 0, 1)
+            # update reportee table
+            self.update_reportee(report.reportedUser, report.link, 1)
+
 
     async def on_ready(self):
         print(f'{self.user.name} has connected to Discord! It is these guilds:')
@@ -86,6 +212,7 @@ class ModBot(discord.Client):
             await self.handle_channel_message(message)
         else:
             await self.handle_dm(message)
+        self.print_tables()
 
 
     async def handle_dm(self, message):
@@ -102,19 +229,44 @@ class ModBot(discord.Client):
             #     return
 
             if message.content.startswith(Report.START_KEYWORD):
-                self.reports.append(Report(self))
-                await self.mod_channel.send(f"Report created by user - type \"queue\" to view outstanding reports.")
-                
-            # Let the report class handle this message; forward all the messages it returns to us
-            if len(self.reports) > 0:
-                responses = await self.reports[-1].handle_message(message)
+                self.active_reporters[message.author.id] = Report(self)
+
+            # Let the report class handle this message and generate a response.
+            # Then, this function sends the response to the user.
+            if message.author.id in self.active_reporters:
+                responses = await self.active_reporters[message.author.id].handle_message(message)
                 for r in responses:
                     await message.channel.send(r)
 
-            # If the report is complete or cancelled, remove it from our map
-            for idx, report in enumerate(self.reports):
-                if report.report_complete():
-                    del self.reports[idx]
+                # If the report needs to be moderated, it puts it in the correct queue and removes it from the list of acitve reports
+                if self.active_reporters[message.author.id].report_csam():
+                    if self.reporter_is_up_to_no_good(message.author.id):
+                        pass
+                    elif self.in_report_table(self.active_reporters[message.author.id]):
+                        self.update_tables(self.active_reporters[message.author.id])
+                        if self.reportee_is_targetted(self.active_reporters[message.author.id].reportedUser, self.active_reporters[message.author.id].link):
+                            self.targetted_users.append(self.active_reporters[message.author.id].reportedUser)
+                    else:
+                        self.reports['user_csam'].append(self.active_reporters[message.author.id])
+                    self.active_reporters.pop(message.author.id)
+                    await self.mod_channel.send(f"Report created by user - type \"queue\" to view outstanding reports.")
+
+                elif self.active_reporters[message.author.id].report_adult():
+                    if self.reporter_is_up_to_no_good(message.author.id):
+                        pass
+                    elif self.in_report_table(self.active_reporters[message.author.id]):
+                        self.update_tables(self.active_reporters[message.author.id])
+                        if self.reportee_is_targetted(self.active_reporters[message.author.id].reportedUser, self.active_reporters[message.author.id].link):
+                            self.targetted_users.append(self.active_reporters[message.author.id].reportedUser)
+                    else:
+                        self.reports['user_adult'].append(self.active_reporters[message.author.id])
+                    self.active_reporters.pop(message.author.id)
+                    await self.mod_channel.send(f"Report created by user - type \"queue\" to view outstanding reports.")
+
+                # If the report is complete or cancelled, remove it from our map
+                elif self.active_reporters[message.author.id].report_complete():
+                    self.active_reporters.pop(message.author.id)
+
 
 
     async def handle_channel_message(self, message):
@@ -131,49 +283,103 @@ class ModBot(discord.Client):
         elif message.channel.name == f'group-{self.group_num}-mod':
             if message.content == Report.QUEUE_KEYWORD:
                 reply = "Moderation process started.\n\n"
-                reply += "Here are the current reported messages in the queue:\n"
-                for idx, report in enumerate(self.reports):
-                    # reply += f"{idx}: `{report.message.content}`\n"
-                    if report.state == State.CSAM:
-                        reply += f"{idx}: `{report.message.content}` {report.link} **(CSAM REPORT - HIGH PRIORITY)**\n"
-                    else:
-                        reply += f"{idx}: `{report.message.content}` {report.link}\n"
+                reply += "Here are the report queues and the number of messages in them:\n"
 
-                reply += "\nPlease enter the number for the message you wish to address."
+                for i in range(len(self.queue_num)):
+                    reply += f"{i} - {self.queue_num[i]}: {len(self.reports[self.queue_num[i]])}\n"
+
+                reply += "\nPlease enter the number for the queue you wish to work on."
                 await message.channel.send(reply)
                 return
 
             # moderator choosing a message to address
             elif message.content.isnumeric():
+                # if the moderator started another moderation before finishing the previous one, put that report back into queue.
+                if message.author.id in self.active_moderators:
+                    if self.active_moderators[message.author.id].report_csam():
+                        self.reports['user_csam'].append(self.active_moderators[message.author.id])
+                        self.active_moderators.pop(message.author.id)
+                    elif self.active_moderators[message.author.id].report_adult():
+                        self.reports['user_adult'].append(self.active_moderators[message.author.id])
+                        self.active_moderators.pop(message.author.id)
+                    else:
+                        self.active_moderators.pop(message.author.id)
+
                 idx = int(message.content)
-                if len(self.reports) != 0 and 0 <= idx < len(self.reports):
-                    target = self.reports[idx]
+                if not 0 <= idx < len(self.reports):
+                    reply = "Please enter a valid queue number."
+                    await message.channel.send(reply)
+                    return
+                elif len(self.reports[self.queue_num[idx]]) == 0:
+                    reply = "This queue is currently empty. Please select another queue."
+                    await message.channel.send(reply)
+                    return
+                else:
+                    queue = self.reports[self.queue_num[idx]]
+                    self.active_moderators[message.author.id] = queue.popleft()
+
+                    # check if the current report has already been handled in the report table.
+                    if self.in_report_table(self.active_moderators[message.author.id]):
+                        # update tables
+                        self.update_tables(self.active_moderators[message.author.id])
+                        self.active_moderators.pop(message.author.id)
+
+                        # check if we can assign the next report to the moderator
+                        if len(queue) > 0:
+                            self.active_moderators[message.author.id] = queue.popleft()
+                        # if not, reply that the queue is empty
+                        else:
+                            reply = "The reports in this report queue has been handled. Please select another queue."
+                            await message.channel.send(reply)
+                            return
 
                     # designate current message being moderated
-                    self.curr_report = target
-                    self.curr_report_idx = idx
-                    await self.mod_channel.send(f"Report checked out: \n{self.curr_report.message.author}: `{self.curr_report.message.content}`")
-                    responses = await target.moderate(target.message)
+                    await self.mod_channel.send(f"Report checked out: \n{self.active_moderators[message.author.id].message.author}: `{self.active_moderators[message.author.id].message.content}`")
+                    responses = await self.active_moderators[message.author.id].moderate(self.active_moderators[message.author.id].message)
                     for r in responses:
                         await message.channel.send(r)
-            
+
+            # if moderators message a non-queue word without selecting a queue
+            elif message.author.id not in self.active_moderators:
+                reply = "Please choose a report queue to start moderating."
+                await message.channel.send(reply)
+
+            elif message.content == Report.EXIT_KEYWORD:
+                # if the moderator started another moderation before finishing the previous one, put that report back into queue.
+                reply = "Moderation cancelled. The report has been reinserted into the reporting queue."
+
+                if self.active_moderators[message.author.id].report_csam():
+                    self.reports['user_csam'].append(self.active_moderators[message.author.id])
+                    self.active_moderators.pop(message.author.id)
+                elif self.active_moderators[message.author.id].report_adult():
+                    self.reports['user_adult'].append(self.active_moderators[message.author.id])
+                    self.active_moderators.pop(message.author.id)
+                else:
+                    self.active_moderators.pop(message.author.id)
+
+                await message.channel.send(reply)
+                return
+
             # moderator addressing a message
             elif message.content == "valid":
-                if self.curr_report.state == State.CSAM:
-                    await self.mod_channel.send(f"Deleted by moderator: \n{self.curr_report.message.author}: `{self.curr_report.message.content}`")
-                    await self.curr_report.message.delete()
+                if self.active_moderators[message.author.id].state == State.CSAM:
+                    await self.mod_channel.send(f"Deleted by moderator: \n{self.active_moderators[message.author.id].message.author}: `{self.active_moderators[message.author.id].message.content}`")
+                    await self.active_moderators[message.author.id].message.delete()
                     reply = "The message has been removed, the user has been banned, and NCMEC has been notified. Thank you!"
                     await message.channel.send(reply)
-                    del self.reports[self.curr_report_idx]
-                    self.curr_report = None
-                    self.curr_report_idx = None
-                    # self.reports.pop(self.curr_reporter)
+
+                    # update report table
+                    self.add_to_report_table(self.active_moderators[message.author.id], "valid")
+                    # update reporter table
+                    self.update_reporter(self.active_moderators[message.author.id].reporter, 1, 0)
+                    # clean up after moderation completed / prepare for moderating new report
+                    self.active_moderators.pop(message.author.id)
                     return
                 
-                if self.curr_report.state == State.ADULT:
-                    await self.mod_channel.send(f"Deleted by moderator: \n{self.curr_report.message.author}: `{self.curr_report.message.content}`")
-                    await self.curr_report.message.delete()
-                    offender = self.curr_report.message.author
+                if self.active_moderators[message.author.id].state == State.ADULT:
+                    await self.mod_channel.send(f"Deleted by moderator: \n{self.active_moderators[message.author.id].message.author}: `{self.active_moderators[message.author.id].message.content}`")
+                    await self.active_moderators[message.author.id].message.delete()
+                    offender = self.active_moderators[message.author.id].message.author
                     if offender in self.warned_users:
                         reply = "The message has been removed and the user has been banned. Thank you!"
                         await message.channel.send(reply)
@@ -181,19 +387,21 @@ class ModBot(discord.Client):
                         self.warned_users.add(offender)
                         reply = "The message has been removed and the user has been warned. Thank you!"
                         await message.channel.send(reply)
-                    
-                    del self.reports[self.curr_report_idx]
-                    self.curr_report = None
-                    self.curr_report_idx = None
-                    # self.reports.pop(self.curr_reporter)
+
+                    # update report table
+                    self.add_to_report_table(self.active_moderators[message.author.id], "valid")
+                    # update reporter table
+                    self.update_reporter(self.active_moderators[message.author.id].reporter, 1, 0)
+                    # clean up after moderation completed / prepare for moderating new report
+                    self.active_moderators.pop(message.author.id)
                     return
 
             elif message.content == "wrong-type":
-                if self.curr_report.state == State.CSAM:
+                if self.active_moderators[message.author.id].state == State.CSAM:
                     await self.mod_channel.send(
-                        f"Deleted by moderator: \n{self.curr_report.message.author}: `{self.curr_report.message.content}`")
-                    await self.curr_report.message.delete()
-                    offender = self.curr_report.message.author
+                        f"Deleted by moderator: \n{self.active_moderators[message.author.id].message.author}: `{self.active_moderators[message.author.id].message.content}`")
+                    await self.active_moderators[message.author.id].message.delete()
+                    offender = self.active_moderators[message.author.id].message.author
                     if offender in self.warned_users:
                         reply = "The message has been removed and the user has been banned. Thank you!"
                         await message.channel.send(reply)
@@ -202,17 +410,41 @@ class ModBot(discord.Client):
                         reply = "The message has been removed and the user has been warned. Thank you!"
                         await message.channel.send(reply)
 
-                    del self.reports[self.curr_report_idx]
-                    self.curr_report = None
-                    self.curr_report_idx = None
-                    # self.reports.pop(self.curr_reporter)
+                    # update report table
+                    self.add_to_report_table(self.active_moderators[message.author.id], "wrong-type")
+                    # update reporter table
+                    self.update_reporter(self.active_moderators[message.author.id].reporter, 1, 0)
+                    # clean up after moderation completed / prepare for moderating new report
+                    self.active_moderators.pop(message.author.id)
                     return
+
+                if self.active_moderators[message.author.id].state == State.ADULT:
+                    await self.mod_channel.send(
+                        f"Deleted by moderator: \n{self.active_moderators[message.author.id].message.author}: `{self.active_moderators[message.author.id].message.content}`")
+                    await self.active_moderators[message.author.id].message.delete()
+                    reply = "The message has been removed, the user has been banned, and NCMEC has been notified. Thank you!"
+                    await message.channel.send(reply)
+
+                    # update report table
+                    self.add_to_report_table(self.active_moderators[message.author.id], "wrong-type")
+                    # update reporter table
+                    self.update_reporter(self.active_moderators[message.author.id].reporter, 1, 0)
+                    # clean up after moderation completed / prepare for moderating new report
+                    self.active_moderators.pop(message.author.id)
+                    return
+
             
             elif message.content == "invalid":
-                del self.reports[self.curr_report_idx]
-                self.curr_report = None
-                self.curr_report_idx = None
-                # self.reports.pop(self.curr_reporter)
+                # update report table
+                self.add_to_report_table(self.active_moderators[message.author.id], "invalid")
+                # update reporter table
+                self.update_reporter(self.active_moderators[message.author.id].reporter, 0, 1)
+                # update reportee table
+                self.update_reportee(self.active_moderators[message.author.id].reportedUser,
+                                     self.active_moderators[message.author.id].link, 0)
+                # clean up after moderation completed / prepare for moderating new report
+                self.active_moderators.pop(message.author.id)
+
                 reply = "Report discarded. Thank you!"
                 await message.channel.send(reply)
                 return
