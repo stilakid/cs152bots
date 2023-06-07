@@ -37,13 +37,15 @@ with open(token_path) as f:
 
 
 class ModBot(discord.Client):
+    REPORTEE_THRESHOLD = 20
+    REPORTER_THRESHOLD = 20
+    REPORTER_THRESHOLD_PERCENTAGE = 0.8
+
     def __init__(self): 
         intents = discord.Intents.default()
         intents.message_content = True
         super().__init__(command_prefix='.', intents=intents)
 
-        REPORTEE_THRESHOLD = 20
-        REPORTER_THRESHOLD = 0.8
         self.group_num = None
         self.mod_channels = {} # Map from guild to the mod channel id for that guild
         # self.reports = {} # Map from user IDs to the state of their report
@@ -138,7 +140,8 @@ class ModBot(discord.Client):
         return user in self.reporter_table
 
     def reporter_is_up_to_no_good(self, user):
-        if self.in_reporter_table(user) and float(self.reporter_table[user][0]) / float(self.reporter_table[user][1]) >= self.REPORTER_THRESHOLD:
+        if self.reporter_table[user][0] + self.reporter_table[user][1] >= self.REPORTER_THRESHOLD and\
+                self.in_reporter_table(user) and float(self.reporter_table[user][0]) / float(self.reporter_table[user][1]) >= self.REPORTER_THRESHOLD_PERCENTAGE:
             return True
         return False
     
