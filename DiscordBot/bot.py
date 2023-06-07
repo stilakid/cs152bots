@@ -17,6 +17,7 @@ import torch
 import torchvision.transforms as transforms
 from classifier.classifier import NN
 
+
 # Set up logging to the console
 logger = logging.getLogger('discord')
 logger.setLevel(logging.DEBUG)
