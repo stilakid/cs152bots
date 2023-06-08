@@ -515,7 +515,6 @@ class ModBot(discord.Client):
                     await self.add_message_to_bot_queue(message, State.ADULT)
             await self.mod_channel.send(self.code_format(message.content))
         return
-
     
     def code_format(self, text):
         ''''
@@ -524,7 +523,6 @@ class ModBot(discord.Client):
         shown in the mod channel. 
         '''
         return "Evaluated image: `" + text+ "`"
-
 
 client = ModBot()
 client.run(discord_token)
