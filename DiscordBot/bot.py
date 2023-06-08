@@ -146,7 +146,8 @@ class ModBot(discord.Client):
         return user in self.reporter_table
 
     def reporter_is_up_to_no_good(self, user):
-        if self.reporter_table[user][0] + self.reporter_table[user][1] >= self.REPORTER_THRESHOLD and\
+        if user in self.reporter_table and\
+                self.reporter_table[user][0] + self.reporter_table[user][1] >= self.REPORTER_THRESHOLD and\
                 self.in_reporter_table(user) and float(self.reporter_table[user][0]) / float(self.reporter_table[user][1]) >= self.REPORTER_THRESHOLD_PERCENTAGE:
             return True
         return False
