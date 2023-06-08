@@ -37,9 +37,9 @@ with open(token_path) as f:
 
 
 class ModBot(discord.Client):
-    REPORTEE_THRESHOLD = 4
-    REPORTER_THRESHOLD = 4
-    REPORTER_THRESHOLD_PERCENTAGE = 0.8
+    REPORTEE_THRESHOLD = 0
+    REPORTER_THRESHOLD = 0
+    REPORTER_THRESHOLD_PERCENTAGE = 0.0
 
     def __init__(self): 
         intents = discord.Intents.default()
@@ -124,7 +124,7 @@ class ModBot(discord.Client):
         if self.report_table.keys().__contains__(report.link):
             if self.report_table[report.link].keys().__contains__(cityhash.CityHash128(report.message.content)):
                 return
-            self.report_table[report.link][cityhash.CityHash128(report.message)] = result
+            self.report_table[report.link][cityhash.CityHash128(report.message.content)] = result
         else:
             self.report_table[report.link] = dict([(cityhash.CityHash128(report.message.content), result)])
 
@@ -244,8 +244,9 @@ class ModBot(discord.Client):
 
                 # If the report needs to be moderated, it puts it in the correct queue and removes it from the list of acitve reports
                 if self.active_reporters[message.author.id].report_csam():
-                    if self.reporter_is_up_to_no_good(message.author.id):
-                        pass
+                    if self.reporter_is_up_to_no_good(message.author.name):
+                        await self.mod_channel.send(f"Report created by user flagged for invalid reports. Placed in hidden queue.")
+                        return
                     elif self.in_report_table(self.active_reporters[message.author.id]):
                         self.update_tables(self.active_reporters[message.author.id])
                         if self.reportee_is_targetted(self.active_reporters[message.author.id].reportedUser, self.active_reporters[message.author.id].link):
@@ -258,8 +259,9 @@ class ModBot(discord.Client):
                     await self.mod_channel.send(f"Report created by user - type \"queue\" to view outstanding reports.")
 
                 elif self.active_reporters[message.author.id].report_adult():
-                    if self.reporter_is_up_to_no_good(message.author.id):
-                        pass
+                    if self.reporter_is_up_to_no_good(message.author.name):
+                        await self.mod_channel.send(f"Report created by user flagged for invalid reports. Placed in hidden queue.")
+                        return
                     elif self.in_report_table(self.active_reporters[message.author.id]):
                         self.update_tables(self.active_reporters[message.author.id])
                         if self.reportee_is_targetted(self.active_reporters[message.author.id].reportedUser, self.active_reporters[message.author.id].link):

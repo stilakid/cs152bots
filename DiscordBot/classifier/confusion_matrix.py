@@ -45,6 +45,6 @@ classes = ("Dog (Adult)", "Cat (CSAM)", "Other")
 cf_matrix = confusion_matrix(y_true, y_pred)
 df_cm = pd.DataFrame(cf_matrix / np.sum(cf_matrix, axis=1)[:, None], index = [i for i in classes],
                      columns = [i for i in classes])
-plt.figure(figsize = (13, 10))
+plt.figure(figsize = (8, 6))
 sn.heatmap(df_cm, annot=True)
 plt.savefig('confusion_matrix.png')
