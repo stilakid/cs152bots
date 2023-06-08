@@ -37,8 +37,8 @@ with open(token_path) as f:
 
 
 class ModBot(discord.Client):
-    REPORTEE_THRESHOLD = 20
-    REPORTER_THRESHOLD = 20
+    REPORTEE_THRESHOLD = 4
+    REPORTER_THRESHOLD = 4
     REPORTER_THRESHOLD_PERCENTAGE = 0.8
 
     def __init__(self): 
@@ -64,7 +64,7 @@ class ModBot(discord.Client):
         self.report_table = dict([("sample.comment.url", dict([(cityhash.CityHash128("this is a sample comment"), "dummy-result")]))])
         self.reporter_table = {}
         self.reportee_table = {}
-        self.targetted_users = []
+        self.targetted_users = {}
         # neural network model for automated image classification
         self.model = NN.load_from_checkpoint("classifier/lightning_logs/version_0/checkpoints/epoch=30-step=43617.ckpt")
         self.model.eval()
@@ -242,7 +242,9 @@ class ModBot(discord.Client):
                     elif self.in_report_table(self.active_reporters[message.author.id]):
                         self.update_tables(self.active_reporters[message.author.id])
                         if self.reportee_is_targetted(self.active_reporters[message.author.id].reportedUser, self.active_reporters[message.author.id].link):
-                            self.targetted_users.append(self.active_reporters[message.author.id].reportedUser)
+                            if self.active_reporters[message.author.id].reportedUser not in self.targetted_users:
+                                self.targetted_users[self.active_reporters[message.author.id].reportedUser] = []
+                            self.targetted_users[self.active_reporters[message.author.id].reportedUser].append(self.active_reporters[message.author.id].link)
                     else:
                         self.reports['user_csam'].append(self.active_reporters[message.author.id])
                     self.active_reporters.pop(message.author.id)
@@ -254,7 +256,9 @@ class ModBot(discord.Client):
                     elif self.in_report_table(self.active_reporters[message.author.id]):
                         self.update_tables(self.active_reporters[message.author.id])
                         if self.reportee_is_targetted(self.active_reporters[message.author.id].reportedUser, self.active_reporters[message.author.id].link):
-                            self.targetted_users.append(self.active_reporters[message.author.id].reportedUser)
+                            if self.active_reporters[message.author.id].reportedUser not in self.targetted_users:
+                                self.targetted_users[self.active_reporters[message.author.id].reportedUser] = []
+                            self.targetted_users[self.active_reporters[message.author.id].reportedUser].append(self.active_reporters[message.author.id].link)
                     else:
                         self.reports['user_adult'].append(self.active_reporters[message.author.id])
                     self.active_reporters.pop(message.author.id)
