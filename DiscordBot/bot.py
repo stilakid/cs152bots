@@ -124,7 +124,7 @@ class ModBot(discord.Client):
         if self.report_table.keys().__contains__(report.link):
             if self.report_table[report.link].keys().__contains__(cityhash.CityHash128(report.message.content)):
                 return
-            self.report_table[report.link][cityhash.CityHash128(report.message)] = result
+            self.report_table[report.link][cityhash.CityHash128(report.message.content)] = result
         else:
             self.report_table[report.link] = dict([(cityhash.CityHash128(report.message.content), result)])
 
