@@ -81,6 +81,12 @@ class ModBot(discord.Client):
         print("Report table")
         print(self.report_table)
 
+    def print_targetted_users_table(self):
+        for user, report_list in self.targetted_users:
+            print(user + ": ")
+            for i in range(1, len(report_list) + 1):
+                print(f"{i}/ {report_list[i - 1]}")
+
     # Given a report, adds it to the report queue for reports made by bots.
     def add_report_to_bot_queue(self, report):
         if self.in_report_table(report):
@@ -289,6 +295,10 @@ class ModBot(discord.Client):
 
                 reply += "\nPlease enter the number for the queue you wish to work on."
                 await message.channel.send(reply)
+                return
+
+            elif message.content == Report.MASS_KEYWORD:
+                self.print_targetted_users_table()
                 return
 
             # moderator choosing a message to address

@@ -32,6 +32,7 @@ class Report:
     HELP_KEYWORD = "help"
     QUEUE_KEYWORD = "queue"
     EXIT_KEYWORD = "exit"
+    MASS_KEYWORD = "mass"
 
     SPAM = "spam"
     HARASSMENT = "harassment"
